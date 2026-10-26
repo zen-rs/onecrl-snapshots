@@ -1,0 +1,45 @@
+name: Snapshot
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snapshot-${{ github.ref }}
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch the OneCRL changeset
+        run: |
+          curl -fsS --retry 5 --retry-all-errors -o onecrl.json \
+            'https://firefox.settings.services.mozilla.com/v1/buckets/security-state/collections/onecrl/changeset?_expected=0'
+          # Every record must be one of the two shapes Firefox enforces.
+          jq -e '
+            (.changes | length > 0) and all(.changes[];
+              (has("issuerName") and has("serialNumber")) or (has("subject") and has("pubKeyHash")))
+          ' onecrl.json > /dev/null
+          echo "TIMESTAMP=$(jq -er .timestamp onecrl.json)" >> "$GITHUB_ENV"
+
+      - name: Publish the snapshot when the collection changed
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TIMESTAMP" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "snapshot $TIMESTAMP is already published"
+            exit 0
+          fi
+          sha256sum onecrl.json | tee onecrl.json.sha256
+          gh release create "$TIMESTAMP" onecrl.json onecrl.json.sha256 \
+            -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "OneCRL $TIMESTAMP" \
+            --notes "The OneCRL changeset as Remote Settings served it at collection timestamp $TIMESTAMP."
